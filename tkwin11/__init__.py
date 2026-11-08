@@ -17,7 +17,7 @@ apply_theme(root) before creating widgets:
 Every component can also be imported from its own module, e.g.
 ``from tkwin11.charts import LineChart``.
 """
-__version__ = '0.2.2'
+__version__ = '0.2.3'
 
 from .menus import bind_context_menu
 from .scrolling import AutoScrollbar

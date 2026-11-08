@@ -53,6 +53,20 @@ root.mainloop()
 
 代码里显式设置的颜色（如 `bg='red'`）保持不变；之后调用 `ttk.Style().theme_use('clam')` 也不会覆盖主题。硬编码像素尺寸、依赖系统位图缩放的程序可以用 `install(dpi=False)`。已经创建好窗口的程序可直接调用 `apply_theme(root)` 与 `theme_classic(root)`。
 
+**可配置的窗口闪烁缓解**（实验性，`install()` 默认启用）：
+
+```python
+import tkwin11
+tkwin11.install()  # 在 tk.Tk() 之前调用，默认 window_flicker_workaround=True
+# 如需关闭，改用：tkwin11.install(window_flicker_workaround=False)
+```
+
+该设置由之后创建的根窗口保存，其 `Toplevel` 窗口继承；仅影响使用 `WindowChrome`、`FluentWindowChrome` 或 `FluentTitleBar` 的自定义标题栏，不会为普通 Tk 窗口自动添加标题栏。重复调用 `install()` 或 `uninstall()` 只影响之后创建的根窗口。
+
+手动调用 `apply_theme()` 的程序，未调用 `install()` 时默认不启用，也可以在创建上述标题栏/窗口控制器时传入 `window_flicker_workaround=True`。单个窗口显式传 `False` 可覆盖 `install()` 的设置，省略或传 `None` 则继承。Gallery 保留手动初始化方式，并在主窗口的 `FluentTitleBar` 中显式启用。
+
+这是一组时序规避措施（最大化时短暂保护背景、还原时显示临时位图、缩放时 1px inset），不是渲染问题的根治。截图发现窗口被遮挡、超出屏幕，或在交接期间再次最小化时，会跳过位图层并退回原生还原；隐藏后重新显示不使用位图层。不同设备、电源模式和 Tk 版本的效果可能不同，详见[实现说明](docs/window-chrome-notes.md)。
+
 **新程序**：
 
 ```python

@@ -9,12 +9,13 @@ from tkinter import ttk
 import tkwin11 as ui
 
 ui.enable_dpi_awareness()
-def check(cls, mode):
+def check(cls, mode, workaround=False):
     root = tk.Tk()
     errors = []
     root.report_callback_exception = lambda *args: errors.append(''.join(traceback.format_exception(*args)))
     root.title(f'{cls.__name__}: {mode}')
     root.geometry('640x420+100+100')
+    root.attributes('-topmost',True)
     ui.apply_theme(root)
     ui.configure_fluent(root)
     toolbar = ttk.Frame(root, height=48)
@@ -25,7 +26,7 @@ def check(cls, mode):
     entry = ttk.Entry(root)
     entry.insert(0, 'Custom title bar regression check')
     entry.pack(fill='x', padx=20, pady=20)
-    chrome = cls(root, toolbar, drag_widgets=(toolbar, label))
+    chrome = cls(root, toolbar, drag_widgets=(toolbar, label), window_flicker_workaround=workaround)
     def pump():
         end=time.monotonic()+0.15
         while time.monotonic()<end:
@@ -65,8 +66,26 @@ def check(cls, mode):
         pump()
         root.deiconify()
         pump()
+        if workaround:assert chrome._restore_animation.job is not None
+        else:assert chrome._restore_animation is None
+        chrome.minimize()
+        pump()
+        if workaround:assert chrome._restore_animation.job is None
+        root.deiconify()
+        pump()
+        # A second minimize during handoff deliberately uses native restore.
+        if workaround:assert chrome._restore_animation.job is None
+        if mode=='normal':
+            root.state('zoomed')
+            pump()
+            chrome.minimize()
+            pump()
+            if workaround:assert chrome._restore_zoomed
+            root.deiconify()
+            pump()
+            assert chrome.u.IsZoomed(chrome.hwnd)
         assert not errors, '\n'.join(errors)
-        print(f'PASS {cls.__name__} {mode}',flush=True)
+        print(f'PASS {cls.__name__} {mode} workaround={workaround}',flush=True)
     finally:
         root.destroy()
 
@@ -74,6 +93,7 @@ if __name__ == '__main__':
     if sys.platform != 'win32':
         print('SKIP: WindowChrome regression requires Windows')
     else:
-        for cls in (ui.WindowChrome,ui.FluentWindowChrome):
-            for mode in ('normal','destroy','single','override','before_attach'):
-                check(cls,mode)
+        for workaround in (False,True):
+            for cls in (ui.WindowChrome,ui.FluentWindowChrome):
+                for mode in ('normal','destroy','single','override','before_attach'):
+                    check(cls,mode,workaround)

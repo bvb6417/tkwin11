@@ -250,7 +250,10 @@ class Demo(tk.Tk):
 
     def build(self):
         sidebar = ttk.Frame(self, style='Sidebar.TFrame', width=self.px(300))
-        self.titlebar = ui.FluentTitleBar(self, title='TkWin11 Gallery', sidebar_width=300, sidebar=sidebar, on_close=self.close)
+        self.titlebar = ui.FluentTitleBar(
+            self, title='TkWin11 Gallery', sidebar_width=300, sidebar=sidebar,
+            on_close=self.close, window_flicker_workaround=True,
+        )
         self.titlebar.pack(fill='x')
         self.build_search()
         sidebar.pack(side='left', fill='y')

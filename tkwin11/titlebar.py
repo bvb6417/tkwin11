@@ -6,7 +6,7 @@ from .fluent import configure_fluent, FluentWindowChrome
 
 
 class FluentTitleBar(ttk.Frame):
-    def __init__(self,root,*,title=None,sidebar_width=0,sidebar=None,on_close=None,height=48):
+    def __init__(self,root,*,title=None,sidebar_width=0,sidebar=None,on_close=None,height=48,window_flicker_workaround=None):
         apply_theme(root)
         configure_fluent(root)
         px=lambda n:round(n*root.winfo_fpixels('1i')/96)
@@ -24,7 +24,7 @@ class FluentTitleBar(ttk.Frame):
         self.title_variable=tk.StringVar(root,value=root.title() if title is None else title)
         self.label=ttk.Label(brand,textvariable=self.title_variable,style='Sidebar.TLabel' if sidebar_width else 'Workspace.TLabel')
         self.label.pack(side='left',padx=px(24))
-        self.chrome=FluentWindowChrome(root,self,drag_widgets=(self,brand,self.label),title_widgets=(self.label,),sidebar=sidebar,on_close=self.request_close)
+        self.chrome=FluentWindowChrome(root,self,drag_widgets=(self,brand,self.label),title_widgets=(self.label,),sidebar=sidebar,on_close=self.request_close,window_flicker_workaround=window_flicker_workaround)
         root.protocol('WM_DELETE_WINDOW',self.request_close)
 
     def _apply_window_dpi(self,dpi):

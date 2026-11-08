@@ -14,13 +14,16 @@ from .tcl_bridge import unbind
 
 
 class WindowChrome:
-    def __init__(self,root,toolbar,drag_widgets=(),on_close=None,sidebar=None):
+    def __init__(self,root,toolbar,drag_widgets=(),on_close=None,sidebar=None,*,window_flicker_workaround=None):
         self.root=root
+        self.window_flicker_workaround=(bool(getattr(root._root(),'_tkwin11_window_flicker_workaround',False))
+                                       if window_flicker_workaround is None else bool(window_flicker_workaround))
         root._window_chrome=self
         self.close_action=on_close or getattr(root,'close',root.destroy)
         self.attached=False
         self._old_proc=None
         self._cache_job=None
+        self._cache_pending=False
         self._drag_rects=[]
         self._excluded=[]
         self._resize_axes=(True,True)
@@ -28,6 +31,9 @@ class WindowChrome:
         self._geometry_originals={}
         self._max_rect=None
         self._snap_hooks={}
+        self._erase_hooks={}
+        self._erase_guard_active=False
+        self._erase_timer_id=0x544B
         self._native_hover=False
         self._native_pressed=False
         self._native_visual=None
@@ -53,7 +59,27 @@ class WindowChrome:
         self.c,self.w=ctypes,w
         self.u=ctypes.WinDLL('user32',use_last_error=True)
         self.dwm=ctypes.WinDLL('dwmapi',use_last_error=True)
+        self.g=ctypes.WinDLL('gdi32',use_last_error=True)
+        self._restore_animation=None
+        if self.window_flicker_workaround:
+            from .restore_animation import RestoreAnimation
+            self._restore_animation=RestoreAnimation(root)
+        self._restore_pending=False
+        self._restore_prepare_requested=False
+        self._restore_zoomed=False
+        self._restore_cancel_requested=False
+        self._minimize_requested=False
         self.PROC=ctypes.WINFUNCTYPE(ctypes.c_ssize_t,w.HWND,w.UINT,w.WPARAM,w.LPARAM)
+        self.ENUMPROC=ctypes.WINFUNCTYPE(w.BOOL,w.HWND,w.LPARAM)
+        self._erase_callback=self.PROC(self.child_window_proc)
+        self._erase_proc_address=ctypes.cast(self._erase_callback,ctypes.c_void_p).value
+        self.u.EnumChildWindows.argtypes=[w.HWND,self.ENUMPROC,w.LPARAM];self.u.EnumChildWindows.restype=w.BOOL
+        self.u.SetTimer.argtypes=[w.HWND,ctypes.c_size_t,w.UINT,ctypes.c_void_p];self.u.SetTimer.restype=ctypes.c_size_t
+        self.u.KillTimer.argtypes=[w.HWND,ctypes.c_size_t];self.u.KillTimer.restype=w.BOOL
+        self.g.CreateSolidBrush.argtypes=[w.COLORREF];self.g.CreateSolidBrush.restype=w.HBRUSH
+        self.g.DeleteObject.argtypes=[w.HGDIOBJ];self.g.DeleteObject.restype=w.BOOL
+        self.u.GetClientRect.argtypes=[w.HWND,ctypes.POINTER(w.RECT)];self.u.GetClientRect.restype=w.BOOL
+        self.u.FillRect.argtypes=[w.HDC,ctypes.POINTER(w.RECT),w.HBRUSH];self.u.FillRect.restype=ctypes.c_int
         self.get_long=self.u.GetWindowLongPtrW
         self.get_long.argtypes=[w.HWND,ctypes.c_int];self.get_long.restype=ctypes.c_ssize_t
         self.set_long=self.u.SetWindowLongPtrW
@@ -66,9 +92,11 @@ class WindowChrome:
         self.u.GetWindowRect.argtypes=[w.HWND,ctypes.POINTER(w.RECT)]
         self.u.IsZoomed.argtypes=[w.HWND]
         self.u.IsIconic.argtypes=[w.HWND];self.u.IsIconic.restype=w.BOOL
+        self.u.ShowWindow.argtypes=[w.HWND,ctypes.c_int];self.u.ShowWindow.restype=w.BOOL
         self.u.AdjustWindowRectExForDpi.argtypes=[ctypes.POINTER(w.RECT),w.DWORD,w.BOOL,w.DWORD,w.UINT]
         self.u.GetMenu.argtypes=[w.HWND];self.u.GetMenu.restype=w.HMENU
         self.u.IsWindow.argtypes=[w.HWND];self.u.IsWindow.restype=w.BOOL
+        self.u.IsWindowVisible.argtypes=[w.HWND];self.u.IsWindowVisible.restype=w.BOOL
         self.u.SendMessageW.argtypes=[w.HWND,w.UINT,w.WPARAM,w.LPARAM];self.u.SendMessageW.restype=ctypes.c_ssize_t
         self.u.PostMessageW.argtypes=[w.HWND,w.UINT,w.WPARAM,w.LPARAM];self.u.PostMessageW.restype=w.BOOL
         self.u.DefWindowProcW.argtypes=[w.HWND,w.UINT,w.WPARAM,w.LPARAM];self.u.DefWindowProcW.restype=ctypes.c_ssize_t
@@ -85,7 +113,9 @@ class WindowChrome:
             _fields_=[('cbSize',w.DWORD),('rcMonitor',w.RECT),('rcWork',w.RECT),('dwFlags',w.DWORD)]
         class MinMaxInfo(ctypes.Structure):
             _fields_=[('ptReserved',w.POINT),('ptMaxSize',w.POINT),('ptMaxPosition',w.POINT),('ptMinTrackSize',w.POINT),('ptMaxTrackSize',w.POINT)]
-        self.MonitorInfo,self.MinMaxInfo=MonitorInfo,MinMaxInfo
+        class WindowPos(ctypes.Structure):
+            _fields_=[('hwnd',w.HWND),('hwndInsertAfter',w.HWND),('x',ctypes.c_int),('y',ctypes.c_int),('cx',ctypes.c_int),('cy',ctypes.c_int),('flags',w.UINT)]
+        self.MonitorInfo,self.MinMaxInfo,self.WindowPos=MonitorInfo,MinMaxInfo,WindowPos
         self.controls=ttk.Frame(toolbar)
         self.controls.pack(side='right',padx=(18,0))
         self.pinned=False
@@ -152,6 +182,7 @@ class WindowChrome:
             size=tuple(self._fixed_size[i] if not self._resize_axes[i] and not axes[i] else requested[i] for i in (0,1))
             if size!=self._fixed_size:self._fixed_size=size;self._fixed_reference=(size,self.dpi)
 
+        self.sync_erase_brush()
         self._callback=self.PROC(self.window_proc)  # Must stay alive for the window lifetime.
         self._old_proc=self.set_long(self.hwnd,-4,self.c.cast(self._callback,self.c.c_void_p))
         if not self._old_proc:return
@@ -163,7 +194,8 @@ class WindowChrome:
         # Preserve Tk ownership/toolwindow/taskbar semantics for Toplevels.
         self._resize_axes=tuple(bool(v) for v in self.root.resizable())
         self.sync_capabilities()
-        margins=(self.c.c_int*4)(1,1,1,1)
+        margin=0 if self.window_flicker_workaround else 1
+        margins=(self.c.c_int*4)(margin,margin,margin,margin)
         self.dwm.DwmExtendFrameIntoClientArea(self.hwnd,self.c.byref(margins))
         corner=self.c.c_int(2)
         self.dwm.DwmSetWindowAttribute(self.hwnd,33,self.c.byref(corner),self.c.sizeof(corner))
@@ -217,8 +249,14 @@ class WindowChrome:
         while widget is not None:
             hwnd=widget.winfo_id()
             if hwnd!=self.hwnd and hwnd not in self._snap_hooks:
+                erase_previous=self._erase_hooks.pop(hwnd,None)
+                if erase_previous is not None and self.get_long(hwnd,-4)==self._erase_proc_address:
+                    self.set_long(hwnd,-4,self.c.c_void_p(erase_previous))
                 previous=self.get_long(hwnd,-4)
                 def proc(h,msg,wp,lp,previous=previous):
+                    if msg==0x14 and self.window_flicker_workaround:
+                        self.erase_background(h,wp)
+                        return 1
                     if msg==0x84 and self._max_rect is not None and all(self._resize_axes):
                         x=self.c.c_short(lp&0xffff).value;y=self.c.c_short((lp>>16)&0xffff).value
                         a,b,c,d=self._max_rect
@@ -233,6 +271,21 @@ class WindowChrome:
     def poll_native(self):
         self._bridge_job=None
         if self.attached:
+            if self._restore_animation is not None and (self._restore_cancel_requested or
+                    ((self._restore_pending or self._restore_animation.busy) and self.root.state()=='withdrawn')):
+                self.cancel_restore()
+            if self._restore_prepare_requested:
+                self._restore_prepare_requested=False
+                self.prepare_restore()
+            if self._restore_pending and self.u.IsIconic(self.hwnd):
+                self._restore_animation.present()
+            if self._restore_pending and not self.u.IsIconic(self.hwnd) and self.u.IsWindowVisible(self.hwnd):
+                self._restore_pending=False
+                self._restore_animation.present()
+                self._restore_animation.start()
+            if self._cache_pending and not self._native_moving:
+                self._cache_pending=False
+                self.refresh_cache()
             if self._dpi_pending is not None:
                 dpi,rect=self._dpi_pending;self._dpi_pending=None
                 self.apply_window_dpi(dpi,rect)
@@ -327,8 +380,105 @@ class WindowChrome:
         monitor=self.u.MonitorFromWindow(self.hwnd,2)
         return info if self.u.GetMonitorInfoW(monitor,self.c.byref(info)) else None
 
+    def sync_erase_brush(self):
+        if not self.window_flicker_workaround:return
+        color=self.root.cget('background')
+        if color==getattr(self,'_erase_color',None):return
+        brush=getattr(self,'_erase_brush',None)
+        if brush is not None:self.g.DeleteObject(brush)
+        rgb=tuple(value>>8 for value in self.root.winfo_rgb(color))
+        self._erase_brush=self.g.CreateSolidBrush(rgb[0]|rgb[1]<<8|rgb[2]<<16)
+        self._erase_color=color
+        if self.sidebar is not None:
+            if getattr(self,'_sidebar_erase_brush',None) is None:
+                rgb=tuple(value>>8 for value in self.root.winfo_rgb(PALETTE['sidebar']))
+                self._sidebar_erase_brush=self.g.CreateSolidBrush(rgb[0]|rgb[1]<<8|rgb[2]<<16)
+            self._sidebar_hwnds=set()
+            def collect(widget):
+                self._sidebar_hwnds.add(widget.winfo_id())
+                for child in widget.winfo_children():collect(child)
+            collect(self.sidebar)
+
+    def erase_background(self,hwnd,hdc):
+        rect=self.w.RECT()
+        self.u.GetClientRect(hwnd,self.c.byref(rect))
+        brush=self._sidebar_erase_brush if getattr(self,'_erase_scope',None)=='sidebar' else self._erase_brush
+        self.u.FillRect(hdc,self.c.byref(rect),brush)
+
+    def child_window_proc(self,hwnd,message,wparam,lparam):
+        previous=self._erase_hooks.get(hwnd)
+        try:
+            if message==0x0014:
+                self.erase_background(hwnd,wparam)
+                return 1
+        except Exception:
+            pass
+        if previous is not None:result=self.u.CallWindowProcW(previous,hwnd,message,wparam,lparam)
+        else:result=self.u.DefWindowProcW(hwnd,message,wparam,lparam)
+        return result
+
+    def begin_erase_guard(self,sidebar_only=False,duration=80):
+        if not self.attached or not self.window_flicker_workaround:return
+        scope='sidebar' if sidebar_only and self.sidebar is not None else 'all'
+        if self._erase_guard_active and getattr(self,'_erase_scope',None)!=scope:self.end_erase_guard()
+        if not self._erase_guard_active:
+            self._erase_guard_active=True
+            self._erase_scope=scope
+            allowed=getattr(self,'_sidebar_hwnds',set())
+            def hook(hwnd,_):
+                if hwnd in self._snap_hooks or (scope=='sidebar' and hwnd not in allowed):return True
+                previous=self.get_long(hwnd,-4)
+                if previous and previous!=self._erase_proc_address and self.set_long(hwnd,-4,self.c.c_void_p(self._erase_proc_address)):
+                    self._erase_hooks[hwnd]=previous
+                return True
+            callback=self.ENUMPROC(hook)
+            self.u.EnumChildWindows(self.hwnd,callback,0)
+        self.u.SetTimer(self.hwnd,self._erase_timer_id,duration,None)
+
+    def end_erase_guard(self):
+        if not self._erase_guard_active:return
+        for hwnd,previous in self._erase_hooks.items():
+            if self.u.IsWindow(hwnd) and self.get_long(hwnd,-4)==self._erase_proc_address:
+                self.set_long(hwnd,-4,self.c.c_void_p(previous))
+        self._erase_hooks.clear()
+        self._erase_guard_active=False
+        self._erase_scope=None
+
     def window_proc(self,hwnd,message,wparam,lparam):
         try:
+            if self.window_flicker_workaround and message==0x0046 and lparam:  # WM_WINDOWPOSCHANGING
+                position=self.c.cast(lparam,self.c.POINTER(self.WindowPos)).contents
+                if position.flags&(0x0040|0x0080):  # SWP_SHOWWINDOW / SWP_HIDEWINDOW
+                    if position.flags&0x0080:
+                        # Hiding is not minimizing. Never capture on SWP_HIDEWINDOW.
+                        # Defer after_cancel (Tcl) to poll_native, outside WndProc.
+                        if not self._minimize_requested and not self.u.IsIconic(hwnd):
+                            self.cancel_restore(native=True)
+                    if position.flags&0x0040 and not position.flags&0x0080 and not self.u.IsIconic(hwnd) and self._restore_pending:
+                        self._restore_animation.present()
+                    if position.flags&0x0040 and self._restore_pending:
+                        self.begin_erase_guard(sidebar_only=True,duration=80)
+            elif self.window_flicker_workaround and message==0x0113 and wparam==self._erase_timer_id:  # WM_TIMER
+                self.u.KillTimer(hwnd,self._erase_timer_id)
+                self.end_erase_guard()
+                return 0
+            if self.window_flicker_workaround and message==0x0112 and wparam&0xfff0==0xf120 and self.u.IsIconic(hwnd) and self._restore_pending:  # SC_RESTORE
+                self._restore_prepare_requested=True
+                return 0
+            if self.window_flicker_workaround and message==0x0112 and wparam&0xfff0==0xf030:  # SC_MAXIMIZE
+                self.begin_erase_guard(duration=80)
+            elif self.window_flicker_workaround and message==0x0112 and wparam&0xfff0==0xf020:  # SC_MINIMIZE
+                self.remember_restore(hwnd)
+                if self._restore_animation.busy:
+                    self.cancel_restore(native=True)
+                elif not self._restore_cancel_requested:
+                    self._restore_pending=self._restore_animation.capture(hwnd)
+                self._minimize_requested=True
+            if message==0x0005:  # WM_SIZE
+                self._minimize_requested=False
+            if self.window_flicker_workaround and message==0x0014:  # WM_ERASEBKGND
+                self.erase_background(hwnd,wparam)
+                return 1
             if message==0x02E0:  # WM_DPICHANGED: copy transient data; Tk work later.
                 rect=self.c.cast(lparam,self.c.POINTER(self.w.RECT)).contents
                 self._dpi_pending=(wparam&0xffff,(rect.left,rect.top,rect.right,rect.bottom))
@@ -352,6 +502,7 @@ class WindowChrome:
                 self.system_move_count+=1
             elif message==0x0232:  # WM_EXITSIZEMOVE
                 self._native_moving=False;self._system_move_pending=False
+                if self.window_flicker_workaround:self._cache_pending=True
             if (message in (0x00A1,0x00A3) and (wparam==2 or 10<=wparam<=17)) or (message==0x0112 and wparam&0xfff0 in (0xf000,0xf010)):
                 # Use Windows' caption/move handler, not Tk's translated mouse
                 # bindings. This enables native Snap without synchronous Tcl
@@ -359,7 +510,7 @@ class WindowChrome:
                 result=self.u.DefWindowProcW(hwnd,message,wparam,lparam)
                 self._system_move_pending=False
                 return result
-            if message==0x0085:  # WM_NCPAINT: no OS caption to paint, including inactive popups.
+            if message==0x0085 and not self.window_flicker_workaround:  # WM_NCPAINT
                 return 0
             if message==0x0086:  # WM_NCACTIVATE: retain client chrome when focus leaves the window.
                 return 1
@@ -369,6 +520,11 @@ class WindowChrome:
                     if info:
                         rect=self.c.cast(lparam,self.c.POINTER(self.w.RECT)).contents
                         rect.left,rect.top,rect.right,rect.bottom=info.rcWork.left,info.rcWork.top,info.rcWork.right,info.rcWork.bottom
+                if self.window_flicker_workaround and self._native_moving:
+                    rect=self.c.cast(lparam,self.c.POINTER(self.w.RECT)).contents
+                    # One-pixel inset avoids a DWM native-child resize artifact:
+                    # https://stackoverflow.com/q/6500336
+                    rect.bottom-=1
                 return 0
             if message==0x0112 and wparam&0xfff0==0xf030 and not all(self._resize_axes):return 0
             if message==0x0024:
@@ -416,6 +572,9 @@ class WindowChrome:
 
     def schedule_cache(self,event=None):
         if event is not None and event.widget is not self.root:return
+        if self.window_flicker_workaround and self._native_moving:
+            self._cache_pending=True
+            return
         if self._cache_job is None:self._cache_job=self.root.after(16,self.refresh_cache)
 
     def refresh_cache(self):
@@ -424,12 +583,16 @@ class WindowChrome:
         # Tk can replace its wrapper HWND after wm resizable/transient changes.
         wrapper=self.u.GetParent(self.root.winfo_id())
         if wrapper and wrapper!=self.hwnd:
+            self.cancel_restore()
+            self.u.KillTimer(self.hwnd,self._erase_timer_id)
+            self.end_erase_guard()
             if self.u.IsWindow(self.hwnd):
                 self.set_long(self.hwnd,-4,self.c.c_void_p(self._old_proc))
             self.attached=False
             self.attach()
             return
         self.sync_capabilities()
+        self.sync_erase_brush()
         self.resize_margin=max(5,round(self.dpi/96*5))
         self.layout_resize_handles()
         def rect(widget):
@@ -537,11 +700,16 @@ class WindowChrome:
 
     def toggle_maximize(self):
         if not all(self.root.resizable()) and self.root.state()!='zoomed':return
-        self.begin_update()
-        try:
+        if self.window_flicker_workaround:
+            self.cancel_restore()
+            if self.root.state()!='zoomed':self.begin_erase_guard(duration=80)
             self.root.state('normal' if self.root.state()=='zoomed' else 'zoomed')
-            self.root.update_idletasks()
-        finally:self.end_update()
+        else:
+            self.begin_update()
+            try:
+                self.root.state('normal' if self.root.state()=='zoomed' else 'zoomed')
+                self.root.update_idletasks()
+            finally:self.end_update()
         self.schedule_cache()
 
     def begin_update(self):
@@ -556,10 +724,33 @@ class WindowChrome:
                 self.u.SendMessageW(self.hwnd,0x000B,1,0)
                 self.u.RedrawWindow(self.hwnd,None,None,0x0001|0x0080|0x0100|0x0400)
 
+    def remember_restore(self,hwnd):
+        self._restore_zoomed=bool(self.u.IsZoomed(hwnd))
+
+    def cancel_restore(self,native=False):
+        self._restore_pending=False
+        self._restore_prepare_requested=False
+        self._minimize_requested=False
+        self._restore_cancel_requested=native
+        if self._restore_animation is not None:
+            if native:self._restore_animation._destroy_overlay()
+            else:self._restore_animation.discard()
+
+    def prepare_restore(self):
+        if not self.attached or not self.u.IsIconic(self.hwnd):return
+        self.u.ShowWindow(self.hwnd,3 if self._restore_zoomed else 9)
+
     def minimize(self):
         if self.attached:
             self.sync_capabilities()
             if not self.get_long(self.hwnd,-16)&0x00020000:return
+            if self.window_flicker_workaround:
+                self.remember_restore(self.hwnd)
+                # A rapid second minimize must not reuse a stale transition frame.
+                busy=self._restore_animation.busy
+                self.cancel_restore()
+                if not busy:self._restore_pending=self._restore_animation.capture(self.hwnd)
+                self._minimize_requested=True
         self.root.iconify()
 
     def close(self):
@@ -572,6 +763,11 @@ class WindowChrome:
         if sys.platform!='win32':return
         if self._bridge_job is not None:
             self.root.after_cancel(self._bridge_job);self._bridge_job=None
+        self.cancel_restore()
+        self._restore_zoomed=False
+        if getattr(self,'hwnd',None):
+            self.u.KillTimer(self.hwnd,self._erase_timer_id)
+            self.end_erase_guard()
         for hwnd,(previous,callback) in self._snap_hooks.items():
             if self.u.IsWindow(hwnd):self.set_long(hwnd,-4,self.c.c_void_p(previous))
         self._snap_hooks.clear()
@@ -587,6 +783,14 @@ class WindowChrome:
         if self.attached and self._old_proc:
             if self.u.IsWindow(self.hwnd):self.set_long(self.hwnd,-4,self.c.c_void_p(self._old_proc))
             self.attached=False
+        brush=getattr(self,'_erase_brush',None)
+        if brush is not None:
+            self.g.DeleteObject(brush)
+            self._erase_brush=None
+        brush=getattr(self,'_sidebar_erase_brush',None)
+        if brush is not None:
+            self.g.DeleteObject(brush)
+            self._sidebar_erase_brush=None
         for widget,sequence,binding in self._bindings:
             if widget.winfo_exists():unbind(widget,sequence,binding)
         self._bindings.clear()
