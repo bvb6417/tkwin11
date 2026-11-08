@@ -1,4 +1,4 @@
-"""Real Windows HWND regressions for the opt-in transition workaround."""
+"""Real Windows HWND regressions for the configurable transition workaround."""
 import ctypes
 import sys
 import time
@@ -60,8 +60,8 @@ class WindowFlickerWorkaroundTests(unittest.TestCase):
         self.assertIsNone(animation.dc)
         self.assertFalse(chrome._restore_pending)
 
-    def test_default_leaves_workaround_disabled(self):
-        ui.install()
+    def test_install_can_explicitly_disable_workaround(self):
+        ui.install(window_flicker_workaround=False)
         root, chrome, _ = self.window()
         self.assertFalse(chrome.window_flicker_workaround)
         self.assertIsNone(chrome._restore_animation)
@@ -74,8 +74,8 @@ class WindowFlickerWorkaroundTests(unittest.TestCase):
         self.pump()
         self.assertIsNone(chrome._restore_animation)
 
-    def test_install_inherits_to_toplevel_and_allows_override(self):
-        ui.install(window_flicker_workaround=True)
+    def test_install_default_enables_inheritance_and_allows_override(self):
+        ui.install()
         root, chrome, _ = self.window()
         self.assertTrue(chrome.window_flicker_workaround)
         child, inherited, _ = self.window(parent=root)

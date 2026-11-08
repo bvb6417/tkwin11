@@ -4,9 +4,9 @@
 
 ## 当前方案
 
-本方案是实验性的时序规避，默认关闭。`install(window_flicker_workaround=True)` 为之后创建的根窗口启用；其 Toplevel 自动继承。它不会给普通 Tk 窗口添加自定义标题栏，也不改变已创建根窗口的设置。
+本方案是实验性的时序规避。`install()` 默认以 `window_flicker_workaround=True` 为之后创建的根窗口启用；其 Toplevel 自动继承。传入 `window_flicker_workaround=False` 可关闭。它不会给普通 Tk 窗口添加自定义标题栏，也不改变已创建根窗口的设置。
 
-`WindowChrome`、`FluentWindowChrome` 和 `FluentTitleBar` 同样接受 `window_flicker_workaround`：`None`（默认）继承所属 Tk 根窗口设置，`True` / `False` 显式覆盖。不经过 `install()` 的程序可直接在创建这些组件时启用。
+`WindowChrome`、`FluentWindowChrome` 和 `FluentTitleBar` 同样接受 `window_flicker_workaround`：`None`（默认）继承所属 Tk 根窗口设置，`True` / `False` 显式覆盖。不经过 `install()` 的程序默认关闭，可直接在创建这些组件时启用。Gallery 保留原有 `enable_dpi_awareness()` 和手动主题初始化，在主窗口 `FluentTitleBar` 中显式传 `True`。
 
 关闭时不创建位图控制器、不接管背景擦除，也不使用 1px inset、拖动时缓存/激活延迟；DWM frame、非客户区绘制和最大化路径保持上游 v0.2.2 行为。
 
@@ -132,7 +132,7 @@ python tests/check_window_chrome.py
 git diff --check
 ```
 
-WindowChrome 与 FluentWindowChrome 的 normal、destroy、single、override、before_attach 在开关关闭/开启两种状态下共 20 组测试必须全部通过。`test_window_flicker_workaround.py` 另覆盖默认关闭、install 继承与覆盖、隐藏/还原、遮挡回退、快速最小化、原生系统命令和交接资源清理。自动状态回归不能替代真实 Gallery 的连续帧和目测验证。
+WindowChrome 与 FluentWindowChrome 的 normal、destroy、single、override、before_attach 在开关关闭/开启两种状态下共 20 组测试必须全部通过。`test_window_flicker_workaround.py` 另覆盖 install 默认启用、显式关闭、继承与覆盖、隐藏/还原、遮挡回退、快速最小化、原生系统命令和交接资源清理。自动状态回归不能替代真实 Gallery 的连续帧和目测验证。
 
 后续修改时：
 
