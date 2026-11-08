@@ -110,7 +110,7 @@ class FluentWindowChrome(WindowChrome):
 
     def check_activation(self):
         self._activation_job=None
-        if self._native_moving:
+        if self.window_flicker_workaround and self._native_moving:
             self.schedule_activation()
             return
         focus=self.root.focus_displayof()

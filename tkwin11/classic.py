@@ -71,7 +71,7 @@ def theme_classic(root):
     walk(root)
 
 
-def install(*,dpi=True,classic=True,lock_theme=True,**theme):
+def install(*,dpi=True,classic=True,lock_theme=True,window_flicker_workaround=False,**theme):
     """One-line upgrade for an existing tkinter program::
 
         import tkwin11; tkwin11.install()   # before the first tk.Tk()
@@ -82,9 +82,13 @@ def install(*,dpi=True,classic=True,lock_theme=True,**theme):
     Win11 look; style.configure() customisations still apply on top.
     Pass ``dpi=False`` for programs that hard-code pixel geometry and rely on
     Windows bitmap scaling.
+    ``window_flicker_workaround=True`` opts future roots and their Toplevels
+    into experimental WindowChrome transition workarounds. It does not add a
+    custom title bar to ordinary Tk windows or change roots already created.
     """
     if dpi:enable_dpi_awareness()
-    settings=dict(classic=classic,lock_theme=lock_theme,theme=theme)
+    settings=dict(classic=classic,lock_theme=lock_theme,
+                  window_flicker_workaround=bool(window_flicker_workaround),theme=theme)
     current=getattr(tk.Tk,'_tkwin11_install',None)
     if current is not None:
         current.update(settings);return
@@ -93,6 +97,7 @@ def install(*,dpi=True,classic=True,lock_theme=True,**theme):
         original(self,*args,**kwargs)
         if not getattr(self,'_tkloaded',False):return
         options=tk.Tk._tkwin11_install
+        self._tkwin11_window_flicker_workaround=options['window_flicker_workaround']
         apply_theme(self,**options['theme'])
         if options['classic']:theme_classic(self)
         if options['lock_theme']:self._dpi_resources.locked_theme=THEME

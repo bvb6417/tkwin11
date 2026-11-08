@@ -1,8 +1,14 @@
 # WindowChrome 闪烁问题与窗口状态切换修复记录
 
-更新日期：2026-10-26
+更新日期：2026-11-08
 
 ## 当前方案
+
+本方案是实验性的时序规避，默认关闭。`install(window_flicker_workaround=True)` 为之后创建的根窗口启用；其 Toplevel 自动继承。它不会给普通 Tk 窗口添加自定义标题栏，也不改变已创建根窗口的设置。
+
+`WindowChrome`、`FluentWindowChrome` 和 `FluentTitleBar` 同样接受 `window_flicker_workaround`：`None`（默认）继承所属 Tk 根窗口设置，`True` / `False` 显式覆盖。不经过 `install()` 的程序可直接在创建这些组件时启用。
+
+关闭时不创建位图控制器、不接管背景擦除，也不使用 1px inset、拖动时缓存/激活延迟；DWM frame、非客户区绘制和最大化路径保持上游 v0.2.2 行为。
 
 正常最大化和最小化还原是两条不同的绘制路径，不共用静态层，也不再对正常最大化强制同步重绘。
 
@@ -17,7 +23,7 @@
 - 不再执行 `update_idletasks() + RedrawWindow()` 抢画；
 - `WM_NCCALCSIZE` 的最大化工作区处理保持不变。
 
-用户在真实 Gallery 中确认，全窗口 80ms 保护解决了此前的黑闪；随后分别移除同步重绘和顶部 frame，未观察到效果回退。电池模式下仍可能短暂看到接近背景色的白板，但暂不为此引入电源检测或动态时长。
+原 PR 的真实 Gallery 实验报告，全窗口 80ms 保护改善了此前的黑闪；随后分别移除同步重绘和顶部 frame，未观察到效果回退。电池模式下仍可能短暂看到接近背景色的白板，不保证所有硬件上的效果。
 
 长期全窗口擦除保护曾引起右侧频闪和还原回归。80ms 版本有效不代表可以恢复原来的 1000ms 全量接管。
 
@@ -27,12 +33,15 @@
 
 流程：
 
-1. 最小化前使用屏幕 `BitBlt` 保存完整画面；已有有效截图时，不使用后续过渡帧覆盖。
-2. iconic 状态下收到 `SC_RESTORE` 时，窗口过程只设置请求标志，不直接调用 Tk。
+1. `minimize()` 或原生 `SC_MINIMIZE` 入口，使用屏幕 `BitBlt` 保存客户区画面。复制前后检查目标可见、未最小化、在虚拟桌面范围内，且 Z 序上方没有与截图区域相交的可见窗口；被遮挡或检查失败时不创建位图，退回原生还原。透明遮挡也保守地跳过，不猜测其像素内容。
+2. 有有效截图、iconic 状态下收到 `SC_RESTORE` 时，窗口过程只设置请求标志，不直接调用 Tk。
 3. `poll_native()` 在 Tk 主线程调用精简后的 `prepare_restore()`，只执行 `ShowWindow(SW_RESTORE)` 或 `ShowWindow(SW_MAXIMIZE)`。
 4. `Static` 子 HWND 显示保存的位图，跟随父窗口参与 DWM 动画，不是独立置顶覆盖窗口。
 5. 还原后保留静态层 350ms；交接时先 `DwmFlush()`，再销毁子 HWND 并释放 DC 和位图。
-6. 隐藏、快速状态切换和 `detach()` 会取消旧任务并清理资源，避免桌面残留图片。
+6. `withdraw()` 不捕获截图；隐藏时立即移除覆盖层，Tk 主线程随后取消定时任务并释放位图。恢复交接不再依赖轮询是否观察到过 iconic 状态。
+7. 交接期间再次最小化时放弃旧位图，该次退回原生还原。窗口 wrapper 被替换、主动切换最大化和 `detach()` 同样清理资源；还原客户区尺寸与截图不同时不显示旧图。
+
+这是一种保守回退，不是遮挡窗口的离屏渲染。屏幕截图与窗口移动并非原子操作；复制前后的检查缩小了竞争窗口，但不能保证所有并发桌面变化。没有采用同步 [PrintWindow](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-printwindow)，因为该调用发送绘制消息，而原生回调路径不应重入 Tk/Tcl。
 
 相关文件：
 
@@ -41,6 +50,8 @@
 - `tests/check_window_chrome.py`：普通还原、快速状态和最大化状态回归。
 
 ## iconic 预绘制对比结论
+
+以下连续帧数据为原 PR 的历史实验记录，本次修改没有重新测量这些时间。
 
 此前 `prepare_restore()` 还在 `ShowWindow` 前执行 `SetWindowPos + update_idletasks + RedrawWindow`，并将其描述为“预绘制”。真实 Gallery 的三组隔离实验推翻了这一描述：
 
@@ -70,7 +81,7 @@
 - DWM extended frame bounds：`(0,0,1920,1140)`，为实际可见工作区；
 - 旧截图左侧前 9 列和顶部前 9 行为纯黑，静态层把这些屏幕外像素显示到了窗口内部。
 
-当 `IsZoomed(hwnd)` 为真时，截图边界改用 `DwmGetWindowAttribute(..., DWMWA_EXTENDED_FRAME_BOUNDS, ...)`。普通窗口仍使用原截图路径。多显示器和不同 DPI 下不能假定不可见边框固定为 9px。
+原 PR 在 `IsZoomed(hwnd)` 为真时，改用 `DwmGetWindowAttribute(..., DWMWA_EXTENDED_FRAME_BOUNDS, ...)`。当前版本统一使用 `GetClientRect + ClientToScreen` 定位自定义标题栏窗口的客户区，与原生子覆盖层的 `(0, 0)` 对齐；不再截图不可见窗口边框。多显示器和不同 DPI 下不能假定不可见边框固定为 9px。
 
 ## 正常最大化诊断摘要
 
@@ -116,11 +127,12 @@
 
 ```bash
 python -m compileall -q tkwin11 gallery.py tests/check_window_chrome.py
+python -m unittest discover -s tests -p "test_*.py"
 python tests/check_window_chrome.py
 git diff --check
 ```
 
-WindowChrome 与 FluentWindowChrome 的 normal、destroy、single、override、before_attach 共 10 组测试必须全部通过。自动状态回归不能替代真实 Gallery 的连续帧和目测验证。
+WindowChrome 与 FluentWindowChrome 的 normal、destroy、single、override、before_attach 在开关关闭/开启两种状态下共 20 组测试必须全部通过。`test_window_flicker_workaround.py` 另覆盖默认关闭、install 继承与覆盖、隐藏/还原、遮挡回退、快速最小化、原生系统命令和交接资源清理。自动状态回归不能替代真实 Gallery 的连续帧和目测验证。
 
 后续修改时：
 

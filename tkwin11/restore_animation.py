@@ -17,6 +17,13 @@ class RestoreAnimation:
         self.dwm.DwmGetWindowAttribute.argtypes=[w.HWND,w.DWORD,ctypes.c_void_p,w.DWORD]
         self.dwm.DwmGetWindowAttribute.restype=ctypes.c_long
         self.u.GetWindowRect.argtypes=[w.HWND,ctypes.POINTER(w.RECT)]
+        self.u.GetWindowRect.restype=w.BOOL
+        self.u.GetClientRect.argtypes=[w.HWND,ctypes.POINTER(w.RECT)];self.u.GetClientRect.restype=w.BOOL
+        self.u.ClientToScreen.argtypes=[w.HWND,ctypes.POINTER(w.POINT)];self.u.ClientToScreen.restype=w.BOOL
+        self.u.GetWindow.argtypes=[w.HWND,w.UINT];self.u.GetWindow.restype=w.HWND
+        self.u.IsWindowVisible.argtypes=[w.HWND];self.u.IsWindowVisible.restype=w.BOOL
+        self.u.IsIconic.argtypes=[w.HWND];self.u.IsIconic.restype=w.BOOL
+        self.u.GetSystemMetrics.argtypes=[ctypes.c_int];self.u.GetSystemMetrics.restype=ctypes.c_int
         self.u.IsZoomed.argtypes=[w.HWND];self.u.IsZoomed.restype=w.BOOL
         self.u.GetDC.argtypes=[w.HWND];self.u.GetDC.restype=w.HDC
         self.u.ReleaseDC.argtypes=[w.HWND,w.HDC]
@@ -73,13 +80,10 @@ class RestoreAnimation:
         self.origin=None
 
     def capture(self,hwnd):
-        if self.dc is not None:return True
         if self.busy:return False
-        rect=w.RECT();self.u.GetWindowRect(hwnd,ctypes.byref(rect))
-        if self.u.IsZoomed(hwnd):
-            visible=w.RECT()
-            if self.dwm.DwmGetWindowAttribute(hwnd,9,ctypes.byref(visible),ctypes.sizeof(visible))==0:
-                rect=visible
+        self._release()
+        rect=self._client_rect(hwnd)
+        if rect is None or not self._unobscured(hwnd,rect):return False
         width=rect.right-rect.left;height=rect.bottom-rect.top
         if width<=0 or height<=0:return False
         screen=self.u.GetDC(None)
@@ -88,6 +92,8 @@ class RestoreAnimation:
         old=self.g.SelectObject(dc,bitmap) if bitmap else None
         copied=bool(old and self.g.BitBlt(dc,0,0,width,height,screen,rect.left,rect.top,0x00CC0020))
         if screen:self.u.ReleaseDC(None,screen)
+        # Fail closed if another window moved over us during the copy.
+        if copied:copied=self._unobscured(hwnd,rect)
         if not copied:
             if old:self.g.SelectObject(dc,old)
             if bitmap:self.g.DeleteObject(bitmap)
@@ -98,8 +104,49 @@ class RestoreAnimation:
         self.origin=(rect.left,rect.top,width,height)
         return True
 
-    def present(self,destination):
+    def _client_rect(self,hwnd):
+        rect=w.RECT();point=w.POINT()
+        if not self.u.GetClientRect(hwnd,ctypes.byref(rect)) or not self.u.ClientToScreen(hwnd,ctypes.byref(point)):
+            return None
+        return w.RECT(point.x,point.y,point.x+rect.right,point.y+rect.bottom)
+
+    def _unobscured(self,hwnd,rect):
+        """Screen BitBlt is usable only while every captured pixel is ours.
+
+        Do not use PrintWindow here: capture can run inside Tk's WndProc;
+        synchronous WM_PRINT dispatch can re-enter Tcl. On uncertainty skip
+        the optional overlay and let Windows restore the real window.
+        """
+        if not self.u.IsWindowVisible(hwnd) or self.u.IsIconic(hwnd):return False
+        x=self.u.GetSystemMetrics(76);y=self.u.GetSystemMetrics(77)
+        if (rect.left<x or rect.top<y or rect.right>x+self.u.GetSystemMetrics(78)
+                or rect.bottom>y+self.u.GetSystemMetrics(79)):return False
+        # GW_HWNDPREV walks only windows above the target in Z order. Bound
+        # the traversal and detect cycles because HWNDs can change mid-walk.
+        above=self.u.GetWindow(hwnd,3);seen=set()
+        while above:
+            if above in seen or len(seen)>=4096:return False
+            seen.add(above)
+            if self.u.IsWindowVisible(above) and not self.u.IsIconic(above):
+                cloaked=w.DWORD()
+                hidden=self.dwm.DwmGetWindowAttribute(above,14,ctypes.byref(cloaked),ctypes.sizeof(cloaked))==0 and cloaked.value
+                if not hidden:
+                    other=w.RECT()
+                    if self.dwm.DwmGetWindowAttribute(above,9,ctypes.byref(other),ctypes.sizeof(other))!=0:
+                        if not self.u.GetWindowRect(above,ctypes.byref(other)):return False
+                    if (rect.left<other.right and other.left<rect.right and
+                            rect.top<other.bottom and other.top<rect.bottom):return False
+            above=self.u.GetWindow(above,3)
+        return True
+
+    def present(self):
         if self.dc is None:return False
+        if not self.u.IsIconic(self.parent):
+            rect=self._client_rect(self.parent)
+            if rect is None or (rect.right-rect.left,rect.bottom-rect.top)!=self.origin[2:]:
+                self._destroy_overlay()
+                self._release()
+                return False
         if self.overlay is None:
             self.overlay=self.u.CreateWindowExW(0x08000000,'Static','',0x40000000,0,0,self.origin[2],self.origin[3],self.parent,None,None,None)
             if not self.overlay:return False
