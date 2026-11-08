@@ -29,7 +29,13 @@ TkWin11 由 [TkWebUI](https://github.com/bvb6417/tkwebui) 分支而来，两者�
 
 ## 快速开始
 
-把 `tkwin11` 文件夹复制到自己的脚本旁边即可，无需安装第三方包。
+可以通过 PyPI 安装控件库，也可把 `tkwin11` 文件夹复制到自己的脚本旁边：
+
+```bash
+python -m pip install tkwin11
+```
+
+需要 Python 3.8+ 和可用的 Tkinter，核心控件无需第三方依赖。wheel 安装控件库，Gallery 保留在 GitHub 源码和源码发行包中。
 
 **运行 Gallery**：双击 `main.py`，或
 

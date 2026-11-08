@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tkwin11"
+dynamic = ["version"]
+description = "Windows 11 Fluent-style themes and widgets for tkinter and ttk"
+readme = "README.pypi.md"
+requires-python = ">=3.8"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "bvb6417 and TkWin11 contributors"}]
+keywords = ["tkinter", "ttk", "gui", "windows11", "fluent", "theme"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: Microsoft :: Windows",
+    "Topic :: Software Development :: User Interfaces",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/bvb6417/tkwin11"
+Documentation = "https://github.com/bvb6417/tkwin11#readme"
+Issues = "https://github.com/bvb6417/tkwin11/issues"
+Changelog = "https://github.com/bvb6417/tkwin11/blob/main/CHANGELOG.md"
+
+[tool.hatch.version]
+path = "tkwin11/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["tkwin11"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/tkwin11", "/tests", "/docs", "/examples",
+    "/main.py", "/gallery.py", "/LICENSE", "/README.md",
+    "/README.pypi.md", "/CHANGELOG.md", "/pyproject.toml",
+]
